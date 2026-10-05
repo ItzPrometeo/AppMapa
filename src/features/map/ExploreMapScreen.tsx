@@ -14,6 +14,9 @@ import { useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/ui/Button';
+import { IconButton } from '@/components/ui/IconButton';
+import { AvatarLayer } from '@/features/avatar/AvatarLayer';
+import { useAvatarDirector } from '@/features/avatar/useAvatarDirector';
 import { useSaved } from '@/features/destinations/favorites';
 import { TAB_BAR_HEIGHT, tabBarStore } from '@/features/navigation/tabBarStore';
 import { openDirections } from '@/lib/directions';
@@ -135,6 +138,13 @@ export function ExploreMapScreen() {
   const sheetIndex = sheet.key === sheetKey ? sheet.index : defaultIndex;
   const setSheetIndex = useCallback((index: number) => setSheet((s) => ({ ...s, index })), []);
 
+  // ---- Avatar guía ------------------------------------------------------------
+  const sheetVisibleHeight = (snapPoints[sheetIndex] ?? 0) + (tabsVisible ? TAB_BAR_HEIGHT + insets.bottom : 0);
+  const avatar = useAvatarDirector(ex, {
+    dockBottom: sheetVisibleHeight,
+    hidden: searchOpen || mode === 'none' || (mode === 'destination' && sheetIndex === snapPoints.length - 1),
+  });
+
   // ---- Cabecera ---------------------------------------------------------------
   const regionName = state.regionId ? geoRepository.regionName(state.regionId) : '';
   const provinceName = state.provinceId ? geoRepository.provinceName(state.provinceId) : '';
@@ -187,14 +197,17 @@ export function ExploreMapScreen() {
   const openDestinationPage = useCallback(() => {
     if (!destination) return;
     saved.markViewed(destination.id);
+    avatar.openDestination();
     router.push({ pathname: '/destination/[id]', params: { id: destination.id } });
-  }, [destination, router, saved]);
+  }, [avatar, destination, router, saved]);
 
   const toggleSave = useCallback(() => {
     if (!destination) return;
-    if (saved.toggleFavorite(destination.id)) haptics.success();
-    else haptics.selection();
-  }, [destination, saved]);
+    if (saved.toggleFavorite(destination.id)) {
+      haptics.success();
+      avatar.celebrate();
+    } else haptics.selection();
+  }, [avatar, destination, saved]);
 
   // ---- Render -------------------------------------------------------------------
   if (state.phase === 'error') {
@@ -246,6 +259,7 @@ export function ExploreMapScreen() {
                 onClusterPress={actions.onClusterPress}
               />
             )}
+            <AvatarLayer avatar={avatar} />
           </>
         }
       >
@@ -286,6 +300,20 @@ export function ExploreMapScreen() {
         {!ex.isOnline && <MapStatusBanner kind="offline" message="Sin conexión · usando datos guardados" />}
         {ex.notice && <MapStatusBanner kind="error" message={ex.notice} onDismiss={ex.dismissNotice} />}
       </View>
+
+      {level === 'country' && avatar.appeared && !searchOpen && (
+        <View
+          style={[styles.locate, { bottom: SHEET.country + TAB_BAR_HEIGHT + insets.bottom + 12 }]}
+          pointerEvents="box-none"
+        >
+          <IconButton
+            icon="crosshairs-gps"
+            onPress={avatar.locate}
+            accessibilityLabel="Cerca de mí: ubicar al guía en tu posición"
+            disabled={avatar.locating}
+          />
+        </View>
+      )}
 
       {level !== 'country' && !destination && (
         <View style={[styles.controls, { top: topInset + 8 }]} pointerEvents="box-none">
@@ -371,5 +399,6 @@ const styles = StyleSheet.create({
   legend: { position: 'absolute', left: 0, right: 0 },
   banners: { position: 'absolute', left: 16, right: 16, gap: 8, alignItems: 'center' },
   controls: { position: 'absolute', right: 16 },
+  locate: { position: 'absolute', right: 16 },
   edge: { position: 'absolute', left: 0, top: 120, bottom: 160, width: 18 },
 });

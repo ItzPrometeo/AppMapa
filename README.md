@@ -20,7 +20,7 @@ transforman. No hay cambios de pantalla hasta "Ver destino".
 npm install
 npm start            # Expo dev server (i = iOS, a = Android, w = web)
 npm run check        # typecheck + lint + tests
-npm run data         # regenera mapas y destinos (sólo si cambian las fuentes)
+npm run data         # regenera mapas, destinos y avatar (sólo si cambian las fuentes)
 ```
 
 > Requiere un *development build* (`npx expo run:ios|android` o EAS) o Expo Go del SDK 57.
@@ -233,12 +233,58 @@ GET {API}/destinations?provinceId={provinceId}
 plano; si la red falla se usan los guardados o los empaquetados. Favoritos y "vistos recientemente"
 también se guardan en el dispositivo.
 
-## 8. Calidad
+## 8. Avatar guía "SPoint Explorer" (3D)
+
+Un personaje 3D acompaña la exploración. Vive en `src/features/avatar/`:
+
+| Archivo | Rol |
+|---|---|
+| `avatarMachine.ts` | Máquina de estados **pura** de animaciones (cola + bucle base, `seq` anti-carreras) — testeada |
+| `ExplorerAvatar.tsx` | Render con `expo-gl` + three.js: lienzo 112×150 px transparente, cámara ortográfica, crossfade 0,2 s, 30 FPS |
+| `loadExplorerModel.ts` | Carga única del GLB (expo-asset + expo-file-system / fetch en web) |
+| `useAvatarDirector.ts` | Posición y coreografía sincronizada con el mapa, burbujas, "Cerca de mí" |
+| `AvatarLayer.tsx` | Overlay sobre el mapa con placeholder 2D si el 3D no está disponible |
+
+**Escala**: tamaño fijo en pantalla, independiente del zoom — 56 px de alto en el nivel Perú y
+68 px en región/provincia (el mapa es pequeño; un avatar que escalara con el mapa sería invisible o
+gigante). Se ancla por los pies.
+
+**Aparición** (sin pedir ubicación al abrir): al terminar la intro del mapa cae sobre Lima con
+`scale 0 → 1.1 → 1` + `avatar_arrive` y, la primera vez, `avatar_wave` y "¡Hola! Toca una región".
+El botón ⌖ **Cerca de mí** pide la ubicación sólo al tocarlo; si estás en el Perú salta a tu punto
+("Estás aquí · Cusco"), si no, te espera en Lima.
+
+**Transiciones** (eventos que emite `useMapExplorer`: `introDone · press · flightStart · flightEnd ·
+markersShown · destinationSelected`):
+
+| Momento | Avatar |
+|---|---|
+| Pulsar región/provincia | gira hacia ella (`turn_left/right`) y `look_map` |
+| Vuelo hacia dentro | `jump` + `run`; deja de seguir al mapa y se desliza a su acople (abajo-izquierda, sobre el sheet) al ritmo del vuelo |
+| Aparecen los marcadores | `look_map` |
+| Elegir destino | gira hacia el marcador y `point_destination`; se oculta con el sheet expandido |
+| Guardar / Ver destino | `celebrate` / `discover` |
+| Volver | `walk` y regresa a su punto del mapa al llegar al Perú, `arrive` |
+| Tocar al avatar | `wave` + consejo según el nivel |
+
+Con *Reducir movimiento* activo sólo usa `idle`/`arrive` con fundidos, sin desplazamientos.
+
+**Modelo**: `npm run data:avatar` optimiza `data/source/avatar/spoint-explorer-rig.glb`
+(6 MB · 121 k triángulos · 66 skins · 71 mallas) → `assets/models/spoint-explorer.glb`
+(**848 KB · 20 k triángulos · 1 skin · 17 draw calls**, 13 animaciones intactas). Los 66 skins
+compartían articulaciones y sólo diferían en una matriz por malla, que se hornea en los vértices para
+unificarlos y unir por material. Se usa cuantización (sin Draco/Meshopt, que necesitan WebAssembly).
+
+> Requiere *development build* para iOS/Android (expo-gl, expo-location). Verificado en web
+> (Chromium); en dispositivo, si el contexto GL o el modelo fallan, se muestra la gota SPoint en 2D
+> y el mapa sigue funcionando.
+
+## 9. Calidad
 
 ```bash
 npm run typecheck   # TypeScript estricto
 npm run lint        # eslint-config-expo (incluye reglas del React Compiler)
-npm test            # 27 tests: cámara, máquina de estados, datos, hit-test, clustering, caché
+npm test            # 38 tests: cámara, máquinas de estados (mapa y avatar), datos, modelo 3D, hit-test, clustering, caché
 ```
 
 Los tests de datos comprueban, entre otras cosas, que **cada destino cae dentro de su provincia** y

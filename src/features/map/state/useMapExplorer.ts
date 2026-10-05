@@ -42,6 +42,18 @@ import type { MapLabelItem } from '../components/MapLabels';
 import { useMapScene } from '../scene';
 import { canGoBack, explorerReducer, initialExplorerState, levelOf, type Level } from './explorerMachine';
 
+/**
+ * Eventos de la coreografía del mapa, para capas que deben sincronizarse con
+ * ella (p. ej. el avatar guía) sin acoplarse a su implementación.
+ */
+export type ExplorerEvent =
+  | { type: 'introDone' }
+  | { type: 'press'; sx: number; sy: number }
+  | { type: 'flightStart'; from: Level; to: Level; duration: number }
+  | { type: 'flightEnd'; to: Level; completed: boolean }
+  | { type: 'markersShown' }
+  | { type: 'destinationSelected'; sx: number; sy: number };
+
 export type InsetsForLevel = (level: Level, opts?: { destinationOpen?: boolean }) => { top: number; bottom: number };
 
 type Scene = { regionId: string | null; provinceId: string | null };
@@ -76,6 +88,14 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
   const [loadAttempt, setLoadAttempt] = useState(0);
 
   const token = useRef(0);
+  const listeners = useRef(new Set<(e: ExplorerEvent) => void>());
+  const emit = useCallback((e: ExplorerEvent) => listeners.current.forEach((l) => l(e)), []);
+  const subscribe = useCallback((listener: (e: ExplorerEvent) => void) => {
+    listeners.current.add(listener);
+    return () => {
+      listeners.current.delete(listener);
+    };
+  }, []);
   const shown = useRef<Scene>({ regionId: null, provinceId: null });
   const pendingDestination = useRef<string | null>(null);
   const insetsRef = useRef(insetsFor);
@@ -126,7 +146,9 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
     camera.setLimits({ minK: cam.k * 0.9, maxK: cam.k * 5, bounds: country.bounds });
     scene.intro.set(0);
     scene.intro.set(withDelay(120, withTiming(1, { duration: 1150, easing: motion.easeOutCubic })));
-  }, [camera, country, fitCountry, scene.intro, size.width]);
+    const t = setTimeout(() => emit({ type: 'introDone' }), 120 + 1150);
+    return () => clearTimeout(t);
+  }, [camera, country, emit, fitCountry, scene.intro, size.width]);
 
   const regionBounds = (regionId: string) => country?.byId.get(regionId)?.bounds ?? null;
 
@@ -211,8 +233,10 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
       s.provinceFocus.set(fade(0, 260));
       s.regionReveal.set(fade(0, motion.fade));
       s.regionFocus.set(fade(0, d * 0.65, d * 0.35));
+      emit({ type: 'flightStart', from: levelOf(from), to: 'country', duration: d });
       const done = await camera.flyTo(target, { duration: d });
       if (!alive()) return;
+      emit({ type: 'flightEnd', to: 'country', completed: done });
       setDisplay({ regionId: null, provinceId: null });
       setProvinceShape(null);
       if (done) camera.setLimits({ minK: target.k * 0.9, maxK: target.k * 5, bounds: country.bounds });
@@ -274,8 +298,10 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
         // Las provincias aparecen en el último tramo del zoom.
         s.regionReveal.set(fade(1, 480, d * 0.55));
       }
+      emit({ type: 'flightStart', from: levelOf(from), to: 'region', duration: d });
       const done = await camera.flyTo(target, { duration: d });
       if (!alive()) return;
+      emit({ type: 'flightEnd', to: 'region', completed: done });
       setDisplay({ regionId: to.regionId, provinceId: null });
       setProvinceShape(null);
       if (done) setLevelLimits(layer.bounds, target.k, 8);
@@ -307,6 +333,7 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
 
     const target = camera.computeFit(provinceBase.bounds, { padding: padding('province') });
     const d = durationTo(target);
+    emit({ type: 'flightStart', from: levelOf(from), to: 'province', duration: d });
     const flight = camera.flyTo(target, { duration: d });
 
     // El contorno detallado se funde en la segunda mitad del vuelo.
@@ -323,10 +350,12 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
 
     const done = await flight;
     if (!alive()) return;
+    emit({ type: 'flightEnd', to: 'province', completed: done });
     if (done) {
       setLevelLimits(provinceBase.bounds, target.k, 14);
       // Marcadores: 200 ms después + 100 ms entre cada uno (en TouristMarker/MarkersLayer).
       setMarkersVisible(true);
+      emit({ type: 'markersShown' });
     }
   };
 
@@ -376,9 +405,12 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
       const maxK = camera.limits.value?.maxK ?? cam.k * 4;
       k = Math.min(maxK, cam.k * (MIN_MARKER_GAP_PX / Math.max(nearest, 1)));
     }
-    if (!inside || k !== cam.k) {
-      void camera.animateCamera(centerOn(p.x, p.y, k, size, pad), { duration: 480, easing: motion.easeInOutCubic });
+    const finalCam = !inside || k !== cam.k ? centerOn(p.x, p.y, k, size, pad) : cam;
+    if (finalCam !== cam) {
+      void camera.animateCamera(finalCam, { duration: 480, easing: motion.easeInOutCubic });
     }
+    const target = worldToScreen(p.x, p.y, finalCam, size);
+    emit({ type: 'destinationSelected', sx: target.x, sy: target.y });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDestination?.id]);
 
@@ -484,7 +516,9 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
   const onPressIn = useCallback(
     (x: number, y: number) => {
       if (stateRef.current.phase === 'loading') return;
-      setPressedId(hitAt(x, y)?.id ?? null);
+      const hit = hitAt(x, y);
+      setPressedId(hit?.id ?? null);
+      if (hit) emit({ type: 'press', sx: x, sy: y });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [country, regionLayer, size],
@@ -624,6 +658,7 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
     notice,
     dismissNotice: () => setNotice(null),
     canGoBack: canGoBack(state),
+    subscribe,
     actions: {
       onLayout,
       onPressIn,

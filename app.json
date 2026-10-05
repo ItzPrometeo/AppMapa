@@ -33,6 +33,12 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "SPoint usa tu ubicación sólo cuando tocas \"Cerca de mí\", para mostrar al guía donde estás."
+        }
       ]
     ],
     "experiments": {
