@@ -20,7 +20,7 @@ transforman. No hay cambios de pantalla hasta "Ver destino".
 npm install
 npm start            # Expo dev server (i = iOS, a = Android, w = web)
 npm run check        # typecheck + lint + tests
-npm run data         # regenera mapas, destinos y avatar (sólo si cambian las fuentes)
+npm run data         # regenera mapas y destinos (sólo si cambian las fuentes)
 ```
 
 > Requiere un *development build* (`npx expo run:ios|android` o EAS) o Expo Go del SDK 57.
@@ -235,56 +235,58 @@ también se guardan en el dispositivo.
 
 ## 8. Avatar guía "SPoint Explorer" (3D)
 
-Un personaje 3D acompaña la exploración. Vive en `src/features/avatar/`:
+El guía camina **sobre** el mapa: su posición son coordenadas del mapa (sigue a la cámara), pero
+su **tamaño en pantalla es constante** (el mapa puede acercarse 5× y el guía no crece 5×).
+El GLB se usa **sin modificar** (`assets/models/spoint-explorer-rig.glb`, verificado por hash en los
+tests) con sus animaciones originales.
 
-| Archivo | Rol |
+| Archivo (`src/features/avatar/`) | Rol |
 |---|---|
-| `avatarMachine.ts` | Máquina de estados **pura** de animaciones (cola + bucle base, `seq` anti-carreras) — testeada |
-| `ExplorerAvatar.tsx` | Render con `expo-gl` + three.js: lienzo 112×150 px transparente, cámara ortográfica, crossfade 0,2 s, 30 FPS |
-| `loadExplorerModel.ts` | Carga única del GLB (expo-asset + expo-file-system / fetch en web) |
-| `useAvatarDirector.ts` | Posición y coreografía sincronizada con el mapa, burbujas, "Cerca de mí" |
-| `AvatarLayer.tsx` | Overlay sobre el mapa con placeholder 2D si el 3D no está disponible |
+| `avatarMapConfig.ts` | `AVATAR_MAP_CONFIG`: todos los tamaños, tiempos y umbrales, documentados |
+| `AvatarMapController.ts` | Estado único (`AvatarMapState`), clips con crossfade, posición, orientación, sincronía con el zoom, `moveAvatarTo`, `cancelAvatarTransition` |
+| `useAvatarMapController.ts` | Conecta el controlador con los eventos del mapa y el hilo de UI |
+| `avatarEnvironment.ts` | Zona visible, etiquetas/marcadores/controles a evitar y "suelo" permitido por nivel |
+| `safePosition.ts` | `findSafeAvatarPosition()`: búsqueda en espiral de un punto que no tape información |
+| `avatarMath.ts` | Tamaño (`clamp(altoMapa·0.095, 44, 72)` × nivel), `normalizeAvatarScale`, orientación, walk/run/transition, curva de fundido |
+| `transitionTimeline.ts` | Única timeline de pasos temporizados (cancelable) |
+| `ExplorerAvatar.tsx` / `loadExplorerModel.ts` | Render ortográfico (vista 3/4) y carga única del GLB |
+| `AvatarLayer.tsx` | Capa sobre el mapa (no intercepta toques) |
 
-**Escala**: tamaño fijo en pantalla, independiente del zoom — 56 px de alto en el nivel Perú y
-68 px en región/provincia (el mapa es pequeño; un avatar que escalara con el mapa sería invisible o
-gigante). Se ancla por los pies.
+**Eventos del mapa** (`useMapExplorer`): `mapReady`, `transitionStart` (≈ onMapLevelChange),
+`zoomStart`, `zoomEnd`, `mapPan`, `destinationSelected`, `destinationCleared`; el progreso del zoom
+se expone como `camera.flightProgress` (shared value) para sincronizar el fundido sin timers.
 
-**Aparición** (sin pedir ubicación al abrir): al terminar la intro del mapa cae sobre Lima con
-`scale 0 → 1.1 → 1` + `avatar_arrive` y, la primera vez, `avatar_wave` y "¡Hola! Toca una región".
-El botón ⌖ **Cerca de mí** pide la ubicación sólo al tocarlo; si estás en el Perú salta a tu punto
-("Estás aquí · Cusco"), si no, te espera en Lima.
+**Estrategia híbrida**
 
-**Transiciones** (eventos que emite `useMapExplorer`: `introDone · press · flightStart · flightEnd ·
-markersShown · destinationSelected`):
-
-| Momento | Avatar |
+| Situación | Comportamiento |
 |---|---|
-| Pulsar región/provincia | gira hacia ella (`turn_left/right`) y `look_map` |
-| Vuelo hacia dentro | `jump` + `run`; deja de seguir al mapa y se desliza a su acople (abajo-izquierda, sobre el sheet) al ritmo del vuelo |
-| Aparecen los marcadores | `look_map` |
-| Elegir destino | gira hacia el marcador y `point_destination`; se oculta con el sheet expandido |
-| Guardar / Ver destino | `celebrate` / `discover` |
-| Volver | `walk` y regresa a su punto del mapa al llegar al Perú, `arrive` |
-| Tocar al avatar | `wave` + consejo según el nivel |
+| Abrir el mapa | 150 ms → fade 0→1, escala 0.75→1.05→1, pequeña caída, `arrive` → `idle` (≈ 550 ms) |
+| Perú → región (zoom grande) | mira/señala → 2–3 pasos → `jump` → se desvanece con el zoom → se recoloca invisible en el ancla del nuevo nivel → reaparece con `arrive` |
+| Región → provincia | igual; si el zoom es pequeño (≤ 3.2×) y el destino está a la vista, **camina de verdad** hasta allí |
+| Elegir un atractivo (nivel local) | gira → `walk`/`run` según la distancia en pantalla (< 25 % camina, < 65 % corre, más: fundido) → se coloca junto al marcador → `arrive` → `discover` → `idle`; no repite `discover` |
+| Volver | saltito → zoom out con fundido → recolocación → `arrive` |
+| Tocar otro lugar a mitad | `cancelAvatarTransition()` y empieza desde el estado visual actual |
 
-Con *Reducir movimiento* activo sólo usa `idle`/`arrive` con fundidos, sin desplazamientos.
-
-**Modelo**: `npm run data:avatar` optimiza `data/source/avatar/spoint-explorer-rig.glb`
-(6 MB · 121 k triángulos · 66 skins · 71 mallas) → `assets/models/spoint-explorer.glb`
-(**848 KB · 20 k triángulos · 1 skin · 17 draw calls**, 13 animaciones intactas). Los 66 skins
-compartían articulaciones y sólo diferían en una matriz por malla, que se hornea en los vértices para
-unificarlos y unir por material. Se usa cuantización (sin Draco/Meshopt, que necesitan WebAssembly).
+- **Posición** (`AvatarPositionMode`): `MAP_ANCHOR` (ancla segura por nivel), `USER_LOCATION`
+  (sólo en el nivel local y si estás dentro de la zona; el permiso se pide al tocar ⌖ "Cerca de mí"),
+  `DESTINATION` (junto a un atractivo) y `TRANSITION` (durante el zoom).
+- **Nunca tapa** etiquetas importantes, marcadores, controles ni tarjetas: se aparta unos píxeles y
+  queda por debajo de nombres, botones y sheets (y por encima de los marcadores). No intercepta toques.
+- **Rendimiento**: el GLB se carga una vez al entrar al mapa; en memoria, sus 66 skins idénticos
+  comparten un solo esqueleto y las mallas se funden por material (mismo aspecto, ~13 draw calls);
+  bounding box calculado una sola vez; mixer reutilizado; render en pausa cuando no se ve.
+- **Niveles**: la app tiene País → Región → Provincia (+ destino). El controlador ya admite un nivel
+  `DISTRICT`; hoy la provincia actúa como nivel local donde el guía camina entre atractivos.
 
 > Requiere *development build* para iOS/Android (expo-gl, expo-location). Verificado en web
-> (Chromium); en dispositivo, si el contexto GL o el modelo fallan, se muestra la gota SPoint en 2D
-> y el mapa sigue funcionando.
+> (Chromium); en dispositivo, si el contexto GL o el modelo fallan, se muestra la gota SPoint en 2D.
 
 ## 9. Calidad
 
 ```bash
 npm run typecheck   # TypeScript estricto
 npm run lint        # eslint-config-expo (incluye reglas del React Compiler)
-npm test            # 38 tests: cámara, máquinas de estados (mapa y avatar), datos, modelo 3D, hit-test, clustering, caché
+npm test            # 43 tests: cámara, máquinas de estados (mapa y avatar), datos, modelo 3D, hit-test, clustering, caché
 ```
 
 Los tests de datos comprueban, entre otras cosas, que **cada destino cae dentro de su provincia** y

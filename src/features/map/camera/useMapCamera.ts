@@ -54,6 +54,12 @@ export type MapCameraApi = {
   camera: SharedValue<Camera>;
   viewport: SharedValue<Viewport>;
   limits: SharedValue<CameraLimits | null>;
+  /**
+   * Progreso 0→1 del vuelo de cámara en curso (equivale a un `onZoomProgress`
+   * continuo, pero en el hilo de UI). Permite sincronizar efectos —p. ej. el
+   * fundido del avatar— con el zoom sin timers. Queda en 1 al terminar.
+   */
+  flightProgress: SharedValue<number>;
   setViewport: (v: Viewport) => void;
   getCamera: () => Camera;
   getViewport: () => Viewport;
@@ -327,6 +333,7 @@ export function useMapCamera(onUserGestureEnd?: (cam: Camera) => void): {
       camera,
       viewport,
       limits,
+      flightProgress: progress,
       setViewport,
       getCamera,
       getViewport: () => viewportRef.current,
@@ -349,6 +356,7 @@ export function useMapCamera(onUserGestureEnd?: (cam: Camera) => void): {
       getCamera,
       jumpTo,
       limits,
+      progress,
       setLimits,
       setViewport,
       viewport,

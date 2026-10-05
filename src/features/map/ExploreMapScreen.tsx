@@ -14,9 +14,10 @@ import { useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/ui/Button';
-import { IconButton } from '@/components/ui/IconButton';
+import { AVATAR_MAP_CONFIG } from '@/features/avatar/avatarMapConfig';
 import { AvatarLayer } from '@/features/avatar/AvatarLayer';
-import { useAvatarDirector } from '@/features/avatar/useAvatarDirector';
+import { preloadExplorerModel } from '@/features/avatar/loadExplorerModel';
+import { useAvatarMapController } from '@/features/avatar/useAvatarMapController';
 import { useSaved } from '@/features/destinations/favorites';
 import { TAB_BAR_HEIGHT, tabBarStore } from '@/features/navigation/tabBarStore';
 import { openDirections } from '@/lib/directions';
@@ -83,7 +84,11 @@ export function ExploreMapScreen() {
     [headerHeight, insets.bottom],
   );
 
-  const ex = useMapExplorer(insetsFor);
+  // El mapa espera un instante antes de hacer zoom para que el guía mire y dé unos pasos.
+  const ex = useMapExplorer(insetsFor, { preZoomDelayMs: AVATAR_MAP_CONFIG.transition.zoomStartDelayMs });
+
+  // El GLB se carga una sola vez al entrar en el módulo de mapa.
+  useEffect(() => preloadExplorerModel(), []);
   const { state, level, display, actions } = ex;
 
   // ---- Barra inferior: visible sólo en el nivel Perú ------------------------
@@ -139,9 +144,9 @@ export function ExploreMapScreen() {
   const setSheetIndex = useCallback((index: number) => setSheet((s) => ({ ...s, index })), []);
 
   // ---- Avatar guía ------------------------------------------------------------
-  const sheetVisibleHeight = (snapPoints[sheetIndex] ?? 0) + (tabsVisible ? TAB_BAR_HEIGHT + insets.bottom : 0);
-  const avatar = useAvatarDirector(ex, {
-    dockBottom: sheetVisibleHeight,
+  // Se oculta con la búsqueda abierta o la ficha expandida (nunca tapa una tarjeta).
+  const avatar = useAvatarMapController(ex, {
+    insetsFor,
     hidden: searchOpen || mode === 'none' || (mode === 'destination' && sheetIndex === snapPoints.length - 1),
   });
 
@@ -197,17 +202,14 @@ export function ExploreMapScreen() {
   const openDestinationPage = useCallback(() => {
     if (!destination) return;
     saved.markViewed(destination.id);
-    avatar.openDestination();
     router.push({ pathname: '/destination/[id]', params: { id: destination.id } });
-  }, [avatar, destination, router, saved]);
+  }, [destination, router, saved]);
 
   const toggleSave = useCallback(() => {
     if (!destination) return;
-    if (saved.toggleFavorite(destination.id)) {
-      haptics.success();
-      avatar.celebrate();
-    } else haptics.selection();
-  }, [avatar, destination, saved]);
+    if (saved.toggleFavorite(destination.id)) haptics.success();
+    else haptics.selection();
+  }, [destination, saved]);
 
   // ---- Render -------------------------------------------------------------------
   if (state.phase === 'error') {
@@ -238,13 +240,8 @@ export function ExploreMapScreen() {
             : `Mapa de ${level === 'region' ? regionName : provinceName}`
         }
         overlay={
+          // Orden de capas: marcadores → avatar → etiquetas importantes (→ UI fuera del mapa).
           <>
-            <MapLabels
-              items={ex.labels.items}
-              size={ex.labels.size}
-              camera={ex.camera.camera}
-              viewport={ex.camera.viewport}
-            />
             {display.provinceId && state.destinations && (
               <MarkersLayer
                 destinations={ex.destinations}
@@ -260,6 +257,12 @@ export function ExploreMapScreen() {
               />
             )}
             <AvatarLayer avatar={avatar} />
+            <MapLabels
+              items={ex.labels.items}
+              size={ex.labels.size}
+              camera={ex.camera.camera}
+              viewport={ex.camera.viewport}
+            />
           </>
         }
       >
@@ -301,23 +304,16 @@ export function ExploreMapScreen() {
         {ex.notice && <MapStatusBanner kind="error" message={ex.notice} onDismiss={ex.dismissNotice} />}
       </View>
 
-      {level === 'country' && avatar.appeared && !searchOpen && (
-        <View
-          style={[styles.locate, { bottom: SHEET.country + TAB_BAR_HEIGHT + insets.bottom + 12 }]}
-          pointerEvents="box-none"
-        >
-          <IconButton
-            icon="crosshairs-gps"
-            onPress={avatar.locate}
-            accessibilityLabel="Cerca de mí: ubicar al guía en tu posición"
-            disabled={avatar.locating}
-          />
-        </View>
-      )}
-
       {level !== 'country' && !destination && (
         <View style={[styles.controls, { top: topInset + 8 }]} pointerEvents="box-none">
-          <MapControls onZoomIn={actions.zoomIn} onZoomOut={actions.zoomOut} onRecenter={actions.recenter} />
+          <MapControls
+            onZoomIn={actions.zoomIn}
+            onZoomOut={actions.zoomOut}
+            onRecenter={actions.recenter}
+            // "Cerca de mí" sólo en el nivel local: allí la ubicación real tiene sentido geográfico.
+            onLocate={level === 'province' ? avatar.locate : undefined}
+            locating={avatar.locating}
+          />
         </View>
       )}
 
@@ -399,6 +395,5 @@ const styles = StyleSheet.create({
   legend: { position: 'absolute', left: 0, right: 0 },
   banners: { position: 'absolute', left: 16, right: 16, gap: 8, alignItems: 'center' },
   controls: { position: 'absolute', right: 16 },
-  locate: { position: 'absolute', right: 16 },
   edge: { position: 'absolute', left: 0, top: 120, bottom: 160, width: 18 },
 });

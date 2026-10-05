@@ -43,16 +43,43 @@ import { useMapScene } from '../scene';
 import { canGoBack, explorerReducer, initialExplorerState, levelOf, type Level } from './explorerMachine';
 
 /**
- * Eventos de la coreografía del mapa, para capas que deben sincronizarse con
- * ella (p. ej. el avatar guía) sin acoplarse a su implementación.
+ * Eventos de la coreografía del mapa para capas que deben sincronizarse con
+ * ella (el avatar guía) sin acoplarse a su implementación:
+ *
+ *   mapReady            el mapa terminó su animación de entrada
+ *   transitionStart     onMapLevelChange: el usuario eligió otro nivel; llega
+ *                       ANTES del zoom (durante el resaltado), con el punto
+ *                       tocado y la cámara final prevista
+ *   zoomStart / zoomEnd onZoomStart / onZoomEnd del vuelo de cámara
+ *                       (el progreso continuo está en camera.flightProgress)
+ *   mapPan              el usuario terminó de mover/pellizcar el mapa
+ *   destinationSelected / destinationCleared
  */
+export type TransitionTarget = {
+  regionId: string | null;
+  provinceId: string | null;
+  /** Punto representativo del lugar elegido, en pantalla con la cámara actual. */
+  targetScreen: { x: number; y: number } | null;
+  /** Cámara con la que terminará el zoom (si se conoce de antemano). */
+  targetCamera: Camera | null;
+};
+
 export type ExplorerEvent =
-  | { type: 'introDone' }
-  | { type: 'press'; sx: number; sy: number }
-  | { type: 'flightStart'; from: Level; to: Level; duration: number }
-  | { type: 'flightEnd'; to: Level; completed: boolean }
-  | { type: 'markersShown' }
-  | { type: 'destinationSelected'; sx: number; sy: number };
+  | { type: 'mapReady' }
+  | ({ type: 'transitionStart'; from: Level; to: Level } & TransitionTarget)
+  | ({ type: 'zoomStart'; from: Level; to: Level; duration: number } & TransitionTarget)
+  | { type: 'zoomEnd'; to: Level; completed: boolean }
+  | { type: 'mapPan' }
+  | { type: 'destinationSelected'; destinationId: string; world: { x: number; y: number }; finalCamera: Camera }
+  | { type: 'destinationCleared' };
+
+export type ExplorerOptions = {
+  /**
+   * Pausa entre el toque y el inicio del zoom al ENTRAR en un nivel. Por defecto
+   * motion.preZoomDelay; el avatar la amplía para mirar y dar unos pasos.
+   */
+  preZoomDelayMs?: number;
+};
 
 export type InsetsForLevel = (level: Level, opts?: { destinationOpen?: boolean }) => { top: number; bottom: number };
 
@@ -64,10 +91,20 @@ const TAP_TOLERANCE_PX = 14;
 /** Distancia mínima en pantalla entre el destino seleccionado y su vecino más cercano. */
 const MIN_MARKER_GAP_PX = 60;
 
-export function useMapExplorer(insetsFor: InsetsForLevel) {
+export function useMapExplorer(insetsFor: InsetsForLevel, options: ExplorerOptions = {}) {
   const [state, dispatch] = useReducer(explorerReducer, initialExplorerState);
   const scene = useMapScene();
-  const { api: camera, settled } = useMapCamera();
+  const listeners = useRef(new Set<(e: ExplorerEvent) => void>());
+  const emit = useCallback((e: ExplorerEvent) => listeners.current.forEach((l) => l(e)), []);
+  const subscribe = useCallback((listener: (e: ExplorerEvent) => void) => {
+    listeners.current.add(listener);
+    return () => {
+      listeners.current.delete(listener);
+    };
+  }, []);
+  const onUserGestureEnd = useCallback(() => emit({ type: 'mapPan' }), [emit]);
+  const { api: camera, settled } = useMapCamera(onUserGestureEnd);
+  const preZoomDelay = options.preZoomDelayMs ?? motion.preZoomDelay;
   const isOnline = useIsOnline();
 
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -88,14 +125,7 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
   const [loadAttempt, setLoadAttempt] = useState(0);
 
   const token = useRef(0);
-  const listeners = useRef(new Set<(e: ExplorerEvent) => void>());
-  const emit = useCallback((e: ExplorerEvent) => listeners.current.forEach((l) => l(e)), []);
-  const subscribe = useCallback((listener: (e: ExplorerEvent) => void) => {
-    listeners.current.add(listener);
-    return () => {
-      listeners.current.delete(listener);
-    };
-  }, []);
+
   const shown = useRef<Scene>({ regionId: null, provinceId: null });
   const pendingDestination = useRef<string | null>(null);
   const insetsRef = useRef(insetsFor);
@@ -146,7 +176,7 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
     camera.setLimits({ minK: cam.k * 0.9, maxK: cam.k * 5, bounds: country.bounds });
     scene.intro.set(0);
     scene.intro.set(withDelay(120, withTiming(1, { duration: 1150, easing: motion.easeOutCubic })));
-    const t = setTimeout(() => emit({ type: 'introDone' }), 120 + 1150);
+    const t = setTimeout(() => emit({ type: 'mapReady' }), 120 + 1150);
     return () => clearTimeout(t);
   }, [camera, country, emit, fitCountry, scene.intro, size.width]);
 
@@ -218,11 +248,35 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
   // ---------------------------------------------------------------------------
   // Transiciones entre niveles
   // ---------------------------------------------------------------------------
+  /**
+   * Qué eligió el usuario: punto de su etiqueta en pantalla (para que el avatar
+   * mire/camine hacia él) y la cámara final prevista (para colocarlo en el
+   * nuevo nivel antes de que termine el zoom).
+   */
+  const transitionTarget = (to: Scene): TransitionTarget => {
+    const base = { regionId: to.regionId, provinceId: to.provinceId };
+    if (!country) return { ...base, targetScreen: null, targetCamera: null };
+    if (!to.regionId) {
+      return { ...base, targetScreen: null, targetCamera: fitCountry(country) };
+    }
+    const shape = to.provinceId
+      ? geoRepository.peekRegion(to.regionId)?.byId.get(to.provinceId)
+      : country.byId.get(to.regionId);
+    if (!shape) return { ...base, targetScreen: null, targetCamera: null };
+    return {
+      ...base,
+      targetScreen: worldToScreen(shape.label.x, shape.label.y, camera.getCamera(), size),
+      targetCamera: camera.computeFit(shape.bounds, { padding: padding(levelOf(to)) }),
+    };
+  };
+
   const runTransition = async (from: Scene, to: Scene) => {
     if (!country) return;
     const my = ++token.current;
     const alive = () => token.current === my;
     const s = scene;
+    const intent = transitionTarget(to);
+    emit({ type: 'transitionStart', from: levelOf(from), to: levelOf(to), ...intent });
 
     // ---- Volver al Perú --------------------------------------------------
     if (!to.regionId) {
@@ -233,10 +287,10 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
       s.provinceFocus.set(fade(0, 260));
       s.regionReveal.set(fade(0, motion.fade));
       s.regionFocus.set(fade(0, d * 0.65, d * 0.35));
-      emit({ type: 'flightStart', from: levelOf(from), to: 'country', duration: d });
+      emit({ type: 'zoomStart', from: levelOf(from), to: 'country', duration: d, ...intent, targetCamera: target });
       const done = await camera.flyTo(target, { duration: d });
       if (!alive()) return;
-      emit({ type: 'flightEnd', to: 'country', completed: done });
+      emit({ type: 'zoomEnd', to: 'country', completed: done });
       setDisplay({ regionId: null, provinceId: null });
       setProvinceShape(null);
       if (done) camera.setLimits({ minK: target.k * 0.9, maxK: target.k * 5, bounds: country.bounds });
@@ -293,15 +347,15 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
         s.regionFocus.set(fade(1, 200));
         s.regionReveal.set(fade(1, 200));
       } else {
-        await sleep(motion.preZoomDelay);
+        await sleep(preZoomDelay);
         if (!alive()) return;
         // Las provincias aparecen en el último tramo del zoom.
         s.regionReveal.set(fade(1, 480, d * 0.55));
       }
-      emit({ type: 'flightStart', from: levelOf(from), to: 'region', duration: d });
+      emit({ type: 'zoomStart', from: levelOf(from), to: 'region', duration: d, ...intent, targetCamera: target });
       const done = await camera.flyTo(target, { duration: d });
       if (!alive()) return;
-      emit({ type: 'flightEnd', to: 'region', completed: done });
+      emit({ type: 'zoomEnd', to: 'region', completed: done });
       setDisplay({ regionId: to.regionId, provinceId: null });
       setProvinceShape(null);
       if (done) setLevelLimits(layer.bounds, target.k, 8);
@@ -328,12 +382,12 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
     );
     s.provincePulse.set(pop());
 
-    await sleep(motion.preZoomDelay);
+    await sleep(switchingProvince ? motion.preZoomDelay : preZoomDelay);
     if (!alive()) return;
 
     const target = camera.computeFit(provinceBase.bounds, { padding: padding('province') });
     const d = durationTo(target);
-    emit({ type: 'flightStart', from: levelOf(from), to: 'province', duration: d });
+    emit({ type: 'zoomStart', from: levelOf(from), to: 'province', duration: d, ...intent, targetCamera: target });
     const flight = camera.flyTo(target, { duration: d });
 
     // El contorno detallado se funde en la segunda mitad del vuelo.
@@ -350,12 +404,11 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
 
     const done = await flight;
     if (!alive()) return;
-    emit({ type: 'flightEnd', to: 'province', completed: done });
+    emit({ type: 'zoomEnd', to: 'province', completed: done });
     if (done) {
       setLevelLimits(provinceBase.bounds, target.k, 14);
       // Marcadores: 200 ms después + 100 ms entre cada uno (en TouristMarker/MarkersLayer).
       setMarkersVisible(true);
-      emit({ type: 'markersShown' });
     }
   };
 
@@ -383,6 +436,16 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
     [state.destinations, state.destinationId],
   );
 
+  // destinationCleared: el usuario cerró la ficha (o volvió de nivel).
+  const hadDestination = useRef(false);
+  useEffect(() => {
+    if (selectedDestination) hadDestination.current = true;
+    else if (hadDestination.current) {
+      hadDestination.current = false;
+      emit({ type: 'destinationCleared' });
+    }
+  }, [emit, selectedDestination]);
+
   // Al seleccionar un destino, asegurar que el marcador quede visible sobre el bottom sheet.
   useEffect(() => {
     if (!selectedDestination || size.width === 0) return;
@@ -409,8 +472,7 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
     if (finalCam !== cam) {
       void camera.animateCamera(finalCam, { duration: 480, easing: motion.easeInOutCubic });
     }
-    const target = worldToScreen(p.x, p.y, finalCam, size);
-    emit({ type: 'destinationSelected', sx: target.x, sy: target.y });
+    emit({ type: 'destinationSelected', destinationId: selectedDestination.id, world: p, finalCamera: finalCam });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDestination?.id]);
 
@@ -516,9 +578,7 @@ export function useMapExplorer(insetsFor: InsetsForLevel) {
   const onPressIn = useCallback(
     (x: number, y: number) => {
       if (stateRef.current.phase === 'loading') return;
-      const hit = hitAt(x, y);
-      setPressedId(hit?.id ?? null);
-      if (hit) emit({ type: 'press', sx: x, sy: y });
+      setPressedId(hitAt(x, y)?.id ?? null);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [country, regionLayer, size],

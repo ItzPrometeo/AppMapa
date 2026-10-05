@@ -5,10 +5,17 @@ import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 
 import { colors, shadow } from '@/theme/tokens';
 
-type Props = { onZoomIn: () => void; onZoomOut: () => void; onRecenter: () => void };
+type Props = {
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+  onRecenter: () => void;
+  /** Opcional: "Cerca de mí" (sólo en niveles locales). */
+  onLocate?: () => void;
+  locating?: boolean;
+};
 
 /** Controles de cámara: acercar, alejar y re-encuadrar el nivel actual. */
-export const MapControls = memo(function MapControls({ onZoomIn, onZoomOut, onRecenter }: Props) {
+export const MapControls = memo(function MapControls({ onZoomIn, onZoomOut, onRecenter, onLocate, locating }: Props) {
   return (
     <Animated.View entering={FadeIn.duration(240)} exiting={FadeOut.duration(160)} style={styles.column}>
       <View style={styles.card}>
@@ -19,6 +26,11 @@ export const MapControls = memo(function MapControls({ onZoomIn, onZoomOut, onRe
       <View style={styles.card}>
         <ControlButton icon="fit-to-screen-outline" label="Centrar mapa" onPress={onRecenter} />
       </View>
+      {onLocate && (
+        <View style={[styles.card, locating && styles.busy]}>
+          <ControlButton icon="crosshairs-gps" label="Cerca de mí" onPress={onLocate} />
+        </View>
+      )}
     </Animated.View>
   );
 });
@@ -28,7 +40,7 @@ function ControlButton({
   label,
   onPress,
 }: {
-  icon: 'plus' | 'minus' | 'fit-to-screen-outline';
+  icon: 'plus' | 'minus' | 'fit-to-screen-outline' | 'crosshairs-gps';
   label: string;
   onPress: () => void;
 }) {
@@ -46,6 +58,7 @@ function ControlButton({
 
 const styles = StyleSheet.create({
   column: { gap: 10 },
+  busy: { opacity: 0.6 },
   card: { backgroundColor: colors.surface, borderRadius: 14, overflow: 'hidden', ...shadow.sm },
   button: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   pressed: { backgroundColor: colors.surfaceMuted },
